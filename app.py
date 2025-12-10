@@ -14,6 +14,7 @@ import hashlib
 import logging
 import subprocess
 import torch
+import gc
 import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -610,7 +611,18 @@ def asr_task(wavs, asr_type="AED"):
     model = FireRedAsr.from_pretrained(
         asr_type.lower(), f"{ROOT_DIR}/pretrained_models/FireRedASR-{asr_type}-L"
     )
-    logger.info(f"[ASR初始化] 模型加载完成，耗时: {time.time() - model_load_start:.2f}秒")
+    model_load_elapsed = time.time() - model_load_start
+    logger.info(f"[ASR初始化] 模型加载完成，耗时: {model_load_elapsed:.2f}秒")
+
+    # 如果使用GPU，立即将模型移动到GPU，避免每次transcribe时都移动
+    use_gpu = 1 if torch.cuda.is_available() else 0
+    if use_gpu:
+        model_move_start = time.time()
+        logger.info(f"[ASR优化] 开始将模型移动到GPU（常驻）")
+        model.model.cuda()
+        model_move_elapsed = time.time() - model_move_start
+        logger.info(f"[ASR优化] 模型移动到GPU完成，耗时: {model_move_elapsed:.3f}秒")
+        logger.info(f"[ASR优化] 模型已常驻GPU，后续批次将不再移动模型，可节省时间")
 
     idxs = {}
     for i, it in enumerate(wavs):
@@ -622,6 +634,16 @@ def asr_task(wavs, asr_type="AED"):
     use_gpu = 1 if torch.cuda.is_available() else 0
     device_info = "GPU" if use_gpu else "CPU"
     logger.info(f"[ASR配置] 使用设备: {device_info}")
+
+    # 如果使用GPU，记录初始显存状态
+    if use_gpu:
+        try:
+            allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved() / 1024**3    # GB
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            logger.info(f"[显存状态] 初始显存 - 已分配: {allocated:.2f}GB, 已保留: {reserved:.2f}GB, 总计: {total:.2f}GB")
+        except Exception as e:
+            logger.debug(f"[显存状态] 获取初始显存状态失败: {str(e)}")
 
     param = {
         "use_gpu": use_gpu,
@@ -637,25 +659,88 @@ def asr_task(wavs, asr_type="AED"):
         "temperature": 1.0,
     }
 
+    def should_clear_cache(chunk_idx, total_chunks):
+        """判断是否需要清理显存缓存"""
+        if not use_gpu:
+            return False
+
+        # 条件1: 批次数量多（>10个）且每5个批次清理一次
+        if total_chunks > 10 and chunk_idx % 5 == 0:
+            return True
+
+        # 条件2: 最后一个批次，确保清理所有未使用的显存
+        if chunk_idx == total_chunks:
+            return True
+
+        # 条件3: 显存使用率超过80%
+        try:
+            allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved() / 1024**3    # GB
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+
+            usage_ratio = reserved / total
+            if usage_ratio > 0.8:
+                logger.info(f"[显存管理] 显存使用率: {usage_ratio*100:.1f}% ({reserved:.2f}GB/{total:.2f}GB)，触发清理")
+                return True
+        except Exception as e:
+            logger.debug(f"[显存管理] 检查显存使用率失败: {str(e)}")
+
+        return False
+
     processed_count = 0
+    total_transcribe_time = 0.0
+    total_other_time = 0.0
+
     for chunk_idx, it in enumerate(wavs_chunks, 1):
         chunk_start = time.time()
         logger.info(f"[ASR批处理] 处理批次 {chunk_idx}/{total_chunks}，包含 {len(it)} 个音频片段")
+
+        transcribe_start = time.time()
         results = model.transcribe(
             [em["uttid"] for em in it], [em["file"] for em in it], param
         )
+        transcribe_elapsed = time.time() - transcribe_start
+        total_transcribe_time += transcribe_elapsed
+
+        result_merge_start = time.time()
         batch_rtf = None
         for result in results:
             wavs[idxs[result["uttid"]]]["text"] = result["text"]
             processed_count += 1
             if "rtf" in result and batch_rtf is None:
                 batch_rtf = result["rtf"]
+        result_merge_elapsed = time.time() - result_merge_start
+
         chunk_elapsed = time.time() - chunk_start
-        logger.info(f"[ASR批处理] 批次 {chunk_idx}/{total_chunks} 完成，耗时: {chunk_elapsed:.2f}秒，进度: {processed_count}/{len(wavs)} ({processed_count*100//len(wavs)}%)")
+        other_time = chunk_elapsed - transcribe_elapsed - result_merge_elapsed
+        total_other_time += other_time
+
+        logger.info(f"[ASR批处理] 批次 {chunk_idx}/{total_chunks} 完成，总耗时: {chunk_elapsed:.3f}秒 (transcribe: {transcribe_elapsed:.3f}秒, 结果合并: {result_merge_elapsed:.3f}秒, 其他: {other_time:.3f}秒)，进度: {processed_count}/{len(wavs)} ({processed_count*100//len(wavs)}%)")
         if batch_rtf:
             logger.info(f"[ASR批处理] 批次 {chunk_idx} RTF: {batch_rtf}")
 
+        # 记录显存状态（每5个批次或最后一个批次）
+        if use_gpu and (chunk_idx % 5 == 0 or chunk_idx == total_chunks):
+            try:
+                allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved() / 1024**3    # GB
+                total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                usage_ratio = reserved / total * 100
+                logger.info(f"[显存状态] 批次 {chunk_idx} - 已分配: {allocated:.2f}GB, 已保留: {reserved:.2f}GB, 使用率: {usage_ratio:.1f}%")
+            except Exception as e:
+                logger.debug(f"[显存状态] 获取显存状态失败: {str(e)}")
+
+        # 条件清理显存缓存
+        if should_clear_cache(chunk_idx, total_chunks):
+            clear_start = time.time()
+            gc.collect()
+            if use_gpu:
+                torch.cuda.empty_cache()
+            clear_elapsed = time.time() - clear_start
+            logger.info(f"[显存管理] 批次 {chunk_idx} 显存清理完成，耗时: {clear_elapsed:.3f}秒")
+
     logger.info(f"[ASR完成] 所有批次处理完成，共处理 {processed_count} 个音频片段")
+    logger.info(f"[性能统计] transcribe总耗时: {total_transcribe_time:.2f}秒, 其他操作总耗时: {total_other_time:.2f}秒, transcribe占比: {total_transcribe_time/(total_transcribe_time+total_other_time)*100:.1f}%")
     return wavs
 
 
@@ -691,7 +776,7 @@ def cut_audio(audio_file, dir_name):
         "threshold": 0.5,
         "neg_threshold": 0.35,
         "min_speech_duration_ms": 0,
-        "max_speech_duration_s": float("inf"),
+        "max_speech_duration_s": 180,
         "min_silence_duration_ms": 250,
         "speech_pad_ms": 200,
     }

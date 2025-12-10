@@ -21,9 +21,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=5078
-      - BATCH=1
-      # 标点模型路径（可选，如果未设置则使用基于规则的标点恢复）
-      # - PUNCTUATION_MODEL_PATH=/path/to/FireRedChat-punc
+      - BATCH=3
     # GPU 支持（如果系统有 NVIDIA GPU，取消下面的注释）
     deploy:
       resources:

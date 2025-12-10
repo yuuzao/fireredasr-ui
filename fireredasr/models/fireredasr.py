@@ -57,21 +57,38 @@ class FireRedAsr:
 
     @torch.no_grad()
     def transcribe(self, batch_uttid, batch_wav_path, args={}):
+        transcribe_start = time.time()
         logger.info(f"[特征提取] 开始提取特征，批次大小: {len(batch_wav_path)}")
         feat_start = time.time()
         feats, lengths, durs = self.feat_extractor(batch_wav_path)
         feat_elapsed = time.time() - feat_start
         total_dur = sum(durs)
-        logger.info(f"[特征提取] 特征提取完成，耗时: {feat_elapsed:.2f}秒，总音频时长: {total_dur:.2f}秒")
+        logger.info(f"[特征提取] 特征提取完成，耗时: {feat_elapsed:.3f}秒，总音频时长: {total_dur:.2f}秒")
 
         use_gpu = args.get("use_gpu", False)
         if use_gpu:
-            logger.info(f"[设备] 将数据移动到GPU")
+            data_transfer_start = time.time()
+            logger.info(f"[设备] 开始将数据移动到GPU")
             feats, lengths = feats.cuda(), lengths.cuda()
-            self.model.cuda()
+            data_transfer_elapsed = time.time() - data_transfer_start
+            logger.info(f"[设备] 数据传输完成，耗时: {data_transfer_elapsed:.3f}秒")
+
+            # 检查模型是否已经在GPU上，避免重复移动
+            model_device = next(self.model.parameters()).device
+            if model_device.type != 'cuda':
+                model_move_start = time.time()
+                logger.info(f"[设备] 开始将模型移动到GPU（模型当前在 {model_device}）")
+                self.model.cuda()
+                model_move_elapsed = time.time() - model_move_start
+                logger.info(f"[设备] 模型移动完成，耗时: {model_move_elapsed:.3f}秒")
+            else:
+                logger.info(f"[设备优化] 模型已在GPU上（{model_device}），跳过移动，节省时间")
         else:
             logger.info(f"[设备] 使用CPU处理")
-            self.model.cpu()
+            # 检查模型是否在CPU上，避免重复移动
+            model_device = next(self.model.parameters()).device
+            if model_device.type != 'cpu':
+                self.model.cpu()
 
         if self.asr_type == "aed":
             logger.info(f"[AED转录] 开始AED模型转录")
@@ -89,8 +106,9 @@ class FireRedAsr:
 
             elapsed = time.time() - start_time
             rtf= elapsed / total_dur if total_dur > 0 else 0
-            logger.info(f"[AED转录] 转录完成，耗时: {elapsed:.2f}秒，RTF: {rtf:.4f}")
+            logger.info(f"[AED转录] 转录完成，耗时: {elapsed:.3f}秒，RTF: {rtf:.4f}")
 
+            result_process_start = time.time()
             results = []
             for uttid, wav, hyp in zip(batch_uttid, batch_wav_path, hyps):
                 hyp = hyp[0]  # only return 1-best
@@ -99,18 +117,30 @@ class FireRedAsr:
                 logger.debug(f"[AED转录] {uttid}: {text[:50]}..." if len(text) > 50 else f"[AED转录] {uttid}: {text}")
                 results.append({"uttid": uttid, "text": text, "wav": wav,
                     "rtf": f"{rtf:.4f}"})
+            result_process_elapsed = time.time() - result_process_start
+            transcribe_total = time.time() - transcribe_start
+            logger.info(f"[结果处理] 结果处理完成，耗时: {result_process_elapsed:.3f}秒")
+            logger.info(f"[批次总耗时] transcribe总耗时: {transcribe_total:.3f}秒 (特征提取: {feat_elapsed:.3f}秒, 转录: {elapsed:.3f}秒, 其他: {transcribe_total-feat_elapsed-elapsed-result_process_elapsed:.3f}秒)")
             return results
 
         elif self.asr_type == "llm":
             logger.info(f"[LLM转录] 开始LLM模型转录")
+            preprocess_start = time.time()
             logger.info(f"[LLM转录] 预处理文本输入")
             input_ids, attention_mask, _, _ = \
                 LlmTokenizerWrapper.preprocess_texts(
                     origin_texts=[""]*feats.size(0), tokenizer=self.tokenizer,
                     max_len=128, decode=True)
+            preprocess_elapsed = time.time() - preprocess_start
+            logger.info(f"[LLM转录] 预处理完成，耗时: {preprocess_elapsed:.3f}秒")
+
             if use_gpu:
+                token_transfer_start = time.time()
                 input_ids = input_ids.cuda()
                 attention_mask = attention_mask.cuda()
+                token_transfer_elapsed = time.time() - token_transfer_start
+                logger.info(f"[LLM转录] Token数据传输完成，耗时: {token_transfer_elapsed:.3f}秒")
+
             start_time = time.time()
 
             generated_ids = self.model.transcribe(
@@ -125,14 +155,21 @@ class FireRedAsr:
 
             elapsed = time.time() - start_time
             rtf= elapsed / total_dur if total_dur > 0 else 0
-            logger.info(f"[LLM转录] 转录完成，耗时: {elapsed:.2f}秒，RTF: {rtf:.4f}")
+            logger.info(f"[LLM转录] 转录完成，耗时: {elapsed:.3f}秒，RTF: {rtf:.4f}")
+
+            decode_start = time.time()
             texts = self.tokenizer.batch_decode(generated_ids,
                                                 skip_special_tokens=True)
+            decode_elapsed = time.time() - decode_start
+            logger.info(f"[LLM转录] Token解码完成，耗时: {decode_elapsed:.3f}秒")
+
             results = []
             for uttid, wav, text in zip(batch_uttid, batch_wav_path, texts):
                 logger.debug(f"[LLM转录] {uttid}: {text[:50]}..." if len(text) > 50 else f"[LLM转录] {uttid}: {text}")
                 results.append({"uttid": uttid, "text": text, "wav": wav,
                                 "rtf": f"{rtf:.4f}"})
+            transcribe_total = time.time() - transcribe_start
+            logger.info(f"[批次总耗时] transcribe总耗时: {transcribe_total:.3f}秒 (特征提取: {feat_elapsed:.3f}秒, 预处理: {preprocess_elapsed:.3f}秒, 转录: {elapsed:.3f}秒, 解码: {decode_elapsed:.3f}秒, 其他: {transcribe_total-feat_elapsed-preprocess_elapsed-elapsed-decode_elapsed:.3f}秒)")
             return results
 
 
