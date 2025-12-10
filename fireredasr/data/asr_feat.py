@@ -1,10 +1,13 @@
 import math
 import os
+import logging
 
 import kaldiio
 import kaldi_native_fbank as knf
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class ASRFeatExtractor:
@@ -14,19 +17,25 @@ class ASRFeatExtractor:
             frame_shift=10, dither=0.0)
 
     def __call__(self, wav_paths):
+        logger.info(f"[特征提取] 开始提取 {len(wav_paths)} 个音频文件的特征")
         feats = []
         durs = []
-        for wav_path in wav_paths:
+        for idx, wav_path in enumerate(wav_paths, 1):
+            logger.debug(f"[特征提取] 处理文件 {idx}/{len(wav_paths)}: {wav_path}")
             sample_rate, wav_np = kaldiio.load_mat(wav_path)
             dur = wav_np.shape[0] / sample_rate
+            logger.debug(f"[特征提取] 采样率: {sample_rate}Hz, 音频时长: {dur:.2f}秒")
             fbank = self.fbank((sample_rate, wav_np))
             if self.cmvn is not None:
                 fbank = self.cmvn(fbank)
             fbank = torch.from_numpy(fbank).float()
+            logger.debug(f"[特征提取] 特征维度: {fbank.shape}")
             feats.append(fbank)
             durs.append(dur)
         lengths = torch.tensor([feat.size(0) for feat in feats]).long()
+        logger.info(f"[特征提取] 开始填充特征，最大长度: {lengths.max().item()}")
         feats_pad = self.pad_feat(feats, 0.0)
+        logger.info(f"[特征提取] 特征提取完成，批次特征形状: {feats_pad.shape}")
         return feats_pad, lengths, durs
 
     def pad_feat(self, xs, pad_value):

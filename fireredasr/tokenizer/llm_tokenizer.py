@@ -11,7 +11,19 @@ IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 class LlmTokenizerWrapper:
     @classmethod
     def build_llm_tokenizer(cls, llm_path, use_flash_attn=False):
-        tokenizer = AutoTokenizer.from_pretrained(llm_path)
+        # Qwen模型需要trust_remote_code=True
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                llm_path,
+                trust_remote_code=True
+            )
+        except Exception as e:
+            # 如果失败，尝试不使用trust_remote_code
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(llm_path)
+            except Exception as e2:
+                raise Exception(f"无法加载分词器从 {llm_path}: {str(e2)}")
+
         if use_flash_attn:
             tokenizer.padding_side = "left"
         else:
@@ -53,7 +65,7 @@ class LlmTokenizerWrapper:
             messages.append(message)
 
         texts = []
-        # 优先使用模型自带的 chat template（Qwen3 等新模型通常自带）
+        # 优先使用模型自带的 chat template
         # 如果没有，则使用 Qwen2 兼容的模板
         use_custom_template = True
         if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
@@ -61,7 +73,7 @@ class LlmTokenizerWrapper:
             TEMPLATE = None
             use_custom_template = False
         else:
-            # 使用 Qwen2/Qwen3 兼容的模板格式
+            # 使用 Qwen2 兼容的模板格式
             if not decode:
                 TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content']}}{% if loop.last %}{{ '<|im_end|>'}}{% else %}{{ '<|im_end|>\n' }}{% endif %}{% endfor %}"
             else:

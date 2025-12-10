@@ -53,11 +53,52 @@ class FireRedAsrLlm(nn.Module):
                 torch_dtype = torch.float32
 
         # Build LLM
-        llm = AutoModelForCausalLM.from_pretrained(
-            args.llm_dir,
-            attn_implementation=attn_implementation,
-            torch_dtype=torch_dtype,
-        )
+        # Qwen2模型需要trust_remote_code=True
+        try:
+            # 使用trust_remote_code=True加载Qwen2模型
+            llm = AutoModelForCausalLM.from_pretrained(
+                args.llm_dir,
+                attn_implementation=attn_implementation,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            )
+            logging.info("成功使用AutoModelForCausalLM加载Qwen2模型")
+        except ValueError as e:
+            # 如果AutoModel无法识别，尝试显式使用Qwen2ForCausalLM
+            error_str = str(e)
+            if "Unrecognized model" in error_str or "model_type" in error_str:
+                logging.warning(f"AutoModel无法识别模型类型，尝试显式使用Qwen2ForCausalLM: {error_str[:200]}")
+                try:
+                    from transformers import Qwen2ForCausalLM
+                    llm = Qwen2ForCausalLM.from_pretrained(
+                        args.llm_dir,
+                        attn_implementation=attn_implementation,
+                        torch_dtype=torch_dtype,
+                        trust_remote_code=True,
+                    )
+                    logging.info("成功使用Qwen2ForCausalLM加载模型")
+                except ImportError as ie:
+                    logging.error(f"Qwen2ForCausalLM不存在: {str(ie)}")
+                    raise ValueError(f"无法加载模型：Qwen2ForCausalLM不存在，请检查transformers版本") from e
+                except Exception as e2:
+                    logging.error(f"使用Qwen2ForCausalLM加载失败: {str(e2)[:200]}")
+                    raise ValueError(f"无法加载模型：所有尝试都失败") from e
+            else:
+                # 其他ValueError，直接抛出
+                raise e
+        except Exception as e:
+            # 其他错误，尝试不使用trust_remote_code（向后兼容）
+            logging.warning(f"加载模型失败，尝试不使用trust_remote_code: {str(e)[:200]}")
+            try:
+                llm = AutoModelForCausalLM.from_pretrained(
+                    args.llm_dir,
+                    attn_implementation=attn_implementation,
+                    torch_dtype=torch_dtype,
+                )
+                logging.info("成功使用AutoModelForCausalLM加载模型（不使用trust_remote_code）")
+            except Exception as e2:
+                logging.error(f"不使用trust_remote_code也失败: {str(e2)[:200]}")
+                raise ValueError(f"无法加载模型：所有尝试都失败。原始错误: {str(e)}") from e2
         count_model_parameters(llm)
 
         # LLM Freeze or LoRA
@@ -90,14 +131,14 @@ class FireRedAsrLlm(nn.Module):
 
         tokenizer = LlmTokenizerWrapper.build_llm_tokenizer(args.llm_dir)
 
-        # 设置 pad_token_id，优先使用 <|endoftext|>（Qwen2/Qwen3 兼容）
+        # 设置 pad_token_id，优先使用 <|endoftext|>（Qwen2 兼容）
         endoftext_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
         if endoftext_id is not None and endoftext_id != tokenizer.unk_token_id:
             if tokenizer.pad_token_id is None:
                 tokenizer.pad_token_id = endoftext_id
         llm.config.pad_token_id = tokenizer.pad_token_id
 
-        # 设置特殊 token ID（兼容 Qwen2 和 Qwen3）
+        # 设置特殊 token ID（Qwen2 兼容）
         im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
         im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 

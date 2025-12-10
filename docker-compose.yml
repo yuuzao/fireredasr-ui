@@ -10,25 +10,8 @@ services:
       - "35078:5078"
     volumes:
       # ============================================
-      # 模型目录映射（只读，防止容器意外修改模型文件）
-      # ============================================
-      # AED 模型目录映射
-      # 包含: model.pth.tar, config.yaml, cmvn.ark, dict.txt, train_bpe1000.model 等
-      - ./pretrained_models/FireRedASR-AED-L:/app/pretrained_models/FireRedASR-AED-L:ro
-      # LLM 模型目录映射（包含主模型和 Qwen3-8B-Instruct/Qwen2-7B-Instruct 子模型）
-      # 包含: model.pth.tar, config.yaml, cmvn.ark 等
-      - ./pretrained_models/FireRedASR-LLM-L:/app/pretrained_models/FireRedASR-LLM-L:ro
-      # Qwen3-8B-Instruct 模型目录（优先使用，LLM 模型的依赖）
-      # 包含: model-00001-of-00004.safetensors 等 4 个分片文件
-      - ./pretrained_models/FireRedASR-LLM-L/Qwen3-8B-Instruct:/app/pretrained_models/FireRedASR-LLM-L/Qwen3-8B-Instruct:ro
-      # Qwen2-7B-Instruct 模型目录（向后兼容，如果 Qwen3 不存在时使用）
-      # 包含: model-00001-of-00004.safetensors 等 4 个分片文件
-      - ./pretrained_models/FireRedASR-LLM-L/Qwen2-7B-Instruct:/app/pretrained_models/FireRedASR-LLM-L/Qwen2-7B-Instruct:ro
-      # 或者使用整个 pretrained_models 目录映射（如果上述分别映射有问题，可以使用这个）
-      # - ./pretrained_models:/app/pretrained_models:ro
-
-      # ============================================
       # 数据目录映射（读写，用于持久化数据）
+      - ./pretrained_models:/app/pretrained_models:ro
       # ============================================
       # 日志目录映射（持久化日志文件，按日期分割）
       - ./logs:/app/logs
@@ -39,6 +22,8 @@ services:
       - HOST=0.0.0.0
       - PORT=5078
       - BATCH=1
+      # 标点模型路径（可选，如果未设置则使用基于规则的标点恢复）
+      # - PUNCTUATION_MODEL_PATH=/path/to/FireRedChat-punc
     # GPU 支持（如果系统有 NVIDIA GPU，取消下面的注释）
     deploy:
       resources:
