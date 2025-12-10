@@ -142,6 +142,9 @@ def index():
 
 
 @app.route("/v1/audio/transcriptions", methods=["POST", "GET"])
+@app.route(
+    "/v1/audio/translations", methods=["POST", "GET"]
+)  # 别名路由，兼容 translations
 def uploadfile():
     try:
         if "file" not in request.files:  # 检查是否上传了文件
