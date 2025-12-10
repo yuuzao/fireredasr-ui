@@ -89,10 +89,28 @@ class FireRedAsrLlm(nn.Module):
                 llm.print_trainable_parameters()
 
         tokenizer = LlmTokenizerWrapper.build_llm_tokenizer(args.llm_dir)
-        assert tokenizer.pad_token_id == tokenizer.convert_tokens_to_ids("<|endoftext|>")
+
+        # 设置 pad_token_id，优先使用 <|endoftext|>（Qwen2/Qwen3 兼容）
+        endoftext_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+        if endoftext_id is not None and endoftext_id != tokenizer.unk_token_id:
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token_id = endoftext_id
         llm.config.pad_token_id = tokenizer.pad_token_id
-        llm.config.bos_token_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-        llm.config.eos_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+        # 设置特殊 token ID（兼容 Qwen2 和 Qwen3）
+        im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+        if im_start_id is not None and im_start_id != tokenizer.unk_token_id:
+            llm.config.bos_token_id = im_start_id
+        elif not hasattr(llm.config, 'bos_token_id') or llm.config.bos_token_id is None:
+            llm.config.bos_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.pad_token_id
+
+        if im_end_id is not None and im_end_id != tokenizer.unk_token_id:
+            llm.config.eos_token_id = im_end_id
+        elif not hasattr(llm.config, 'eos_token_id') or llm.config.eos_token_id is None:
+            llm.config.eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else tokenizer.pad_token_id
+
         llm.config.default_speech_token_id = tokenizer.convert_tokens_to_ids(
             DEFAULT_SPEECH_TOKEN
         )

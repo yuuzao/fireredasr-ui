@@ -29,7 +29,7 @@ class LlmTokenizerWrapper:
         text = re.sub("\s+", " ", text)
 
         # remove space between Chinese and keep space between English
-        pattern = re.compile(r'([\u3400-\u4dbf\u4e00-\u9fff])')  # Chinese
+        pattern = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff])")  # Chinese
         parts = pattern.split(text.strip())
         parts = [p for p in parts if len(p.strip()) > 0]
         text = "".join(parts)
@@ -53,22 +53,45 @@ class LlmTokenizerWrapper:
             messages.append(message)
 
         texts = []
-        if not decode:
-            TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content']}}{% if loop.last %}{{ '<|im_end|>'}}{% else %}{{ '<|im_end|>\n' }}{% endif %}{% endfor %}"
+        # 优先使用模型自带的 chat template（Qwen3 等新模型通常自带）
+        # 如果没有，则使用 Qwen2 兼容的模板
+        use_custom_template = True
+        if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
+            # 模型自带 chat template，直接使用
+            TEMPLATE = None
+            use_custom_template = False
         else:
-            TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content']}}{% if loop.last %}{{''}}{% else %}{{ '<|im_end|>\n' }}{% endif %}{% endfor %}"
+            # 使用 Qwen2/Qwen3 兼容的模板格式
+            if not decode:
+                TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content']}}{% if loop.last %}{{ '<|im_end|>'}}{% else %}{{ '<|im_end|>\n' }}{% endif %}{% endfor %}"
+            else:
+                TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content']}}{% if loop.last %}{{''}}{% else %}{{ '<|im_end|>\n' }}{% endif %}{% endfor %}"
+
         for i, msg in enumerate(messages):
-            texts.append(
-                tokenizer.apply_chat_template(
-                    msg,
-                    tokenize=True,
-                    chat_template=TEMPLATE,
-                    add_generation_prompt=False,
-                    padding="longest",
-                    max_length=max_len,
-                    truncation=True,
+            if use_custom_template:
+                texts.append(
+                    tokenizer.apply_chat_template(
+                        msg,
+                        tokenize=True,
+                        chat_template=TEMPLATE,
+                        add_generation_prompt=False,
+                        padding="longest",
+                        max_length=max_len,
+                        truncation=True,
+                    )
                 )
-            )
+            else:
+                # 使用模型自带的 chat template
+                texts.append(
+                    tokenizer.apply_chat_template(
+                        msg,
+                        tokenize=True,
+                        add_generation_prompt=False,
+                        padding="longest",
+                        max_length=max_len,
+                        truncation=True,
+                    )
+                )
 
         # Padding texts
         max_len_texts = max([len(text) for text in texts])
@@ -92,7 +115,7 @@ class LlmTokenizerWrapper:
         if mask_prompt:
             mask_indices = torch.where(
                 input_ids == tokenizer.convert_tokens_to_ids("assistant")
-                )
+            )
             for i in range(mask_indices[0].size(0)):
                 row = mask_indices[0][i]
                 col = mask_indices[1][i]

@@ -28,7 +28,10 @@ class FireRedAsr:
         elif asr_type == "llm":
             model_path = os.path.join(model_dir, "model.pth.tar")
             encoder_path = os.path.join(model_dir, "asr_encoder.pth.tar")
-            llm_dir = os.path.join(model_dir, "Qwen2-7B-Instruct")
+            # 支持 Qwen3-8B-Instruct，如果不存在则尝试 Qwen2-7B-Instruct
+            llm_dir = os.path.join(model_dir, "Qwen3-8B-Instruct")
+            if not os.path.exists(llm_dir):
+                llm_dir = os.path.join(model_dir, "Qwen2-7B-Instruct")
             model, tokenizer = load_firered_llm_model_and_tokenizer(
                 model_path, encoder_path, llm_dir)
         model.eval()
